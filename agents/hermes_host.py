@@ -357,9 +357,33 @@ class HermesHostService:
                 self._backend,
             )
 
+            # Self-improve: inject similar past Q/A into system prompt for this turn
+            system_prompt = self.system_prompt
+            try:
+                from agents import self_improve
+
+                system_prompt = self_improve.augment_system_prompt(
+                    self.system_prompt, message
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("self_improve augment skipped: %s", exc)
+
             if self._backend == "hermes":
-                return self._chat_hermes(message, sid)
-            return self._chat_hermes_lite(message, sid)
+                result = self._chat_hermes(message, sid, system_prompt=system_prompt)
+            else:
+                result = self._chat_hermes_lite(
+                    message, sid, system_prompt=system_prompt
+                )
+
+            # Learn successful answers (global recipe store)
+            try:
+                from agents import self_improve
+
+                self_improve.learn_from_result(message, result)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("self_improve learn skipped: %s", exc)
+
+            return result
         except Exception as exc:  # noqa: BLE001
             logger.error("hermes_host.chat failed: %s", exc, exc_info=True)
             return {
@@ -371,26 +395,78 @@ class HermesHostService:
                 "session_id": session_id,
             }
 
-    def _chat_hermes(self, message: str, sid: str) -> dict[str, Any]:
+    def seed_session_history(
+        self,
+        session_id: str,
+        turns: list[tuple[str, str]],
+    ) -> None:
+        """
+        Seed in-memory history from external transcript (e.g. Open WebUI messages[]).
+
+        turns: list of (role, text) where role is user|assistant|human|ai.
+        Only applied when session has no history yet.
+        """
+        if self.skip_memory or not session_id or not turns:
+            return
+        with _lock:
+            if self._sessions.get(session_id):
+                return
+        try:
+            from langchain_core.messages import AIMessage, HumanMessage
+        except Exception:  # noqa: BLE001
+            return
+
+        hist: list[Any] = []
+        for role, text in turns:
+            text = (text or "").strip()
+            if not text:
+                continue
+            r = (role or "").lower()
+            if r in {"user", "human"}:
+                hist.append(HumanMessage(content=text))
+            elif r in {"assistant", "ai", "model"}:
+                hist.append(AIMessage(content=text))
+        if not hist:
+            return
+        limit = max(4, self.session_limit * 2)
+        if len(hist) > limit:
+            hist = hist[-limit:]
+        with _lock:
+            if not self._sessions.get(session_id):
+                self._sessions[session_id] = hist
+                logger.info(
+                    "host.seed_session sid=%s turns=%d", session_id, len(hist)
+                )
+
+    def _chat_hermes(
+        self,
+        message: str,
+        sid: str,
+        *,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
         from run_agent import AIAgent  # type: ignore[import-not-found]
 
+        prompt = system_prompt if system_prompt is not None else self.system_prompt
         history: list[Any] | None = None
         with _lock:
             if sid in self._sessions:
                 history = list(self._sessions[sid])
 
-        agent = AIAgent(**self._hermes_kwargs())
+        kwargs = self._hermes_kwargs()
+        kwargs["ephemeral_system_prompt"] = prompt
+        agent = AIAgent(**kwargs)
         try:
             if history:
                 result = agent.run_conversation(
                     user_message=message,
                     conversation_history=history,
-                    system_message=self.system_prompt,
+                    system_message=prompt,
                 )
             else:
                 result = agent.run_conversation(
                     user_message=message,
-                    system_message=self.system_prompt,
+                    system_message=prompt,
                 )
         except TypeError:
             # older signature
@@ -421,14 +497,21 @@ class HermesHostService:
             "mode": "qxaudit_tool_host",
         }
 
-    def _chat_hermes_lite(self, message: str, sid: str) -> dict[str, Any]:
+    def _chat_hermes_lite(
+        self,
+        message: str,
+        sid: str,
+        *,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+        prompt = system_prompt if system_prompt is not None else self.system_prompt
         with _lock:
             prior = list(self._sessions.get(sid, []))
 
         # Build message list: system + history + user
-        messages: list[Any] = [SystemMessage(content=self.system_prompt)]
+        messages: list[Any] = [SystemMessage(content=prompt)]
         messages.extend(prior)
         messages.append(HumanMessage(content=message))
 
@@ -443,7 +526,7 @@ class HermesHostService:
             result = self._lite_graph.invoke(
                 {
                     "messages": prior
-                    + [HumanMessage(content=f"{self.system_prompt}\n\nUser: {message}")]
+                    + [HumanMessage(content=f"{prompt}\n\nUser: {message}")]
                 },
                 config={"recursion_limit": recursion},
             )

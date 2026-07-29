@@ -1,6 +1,6 @@
 # QXAudit
 
-Asosiy agent: **QXAudit**. Yordamchi agentlar (hozircha RAG) host orqali chaqiriladi.
+Asosiy agent: **QXAudit**. Yordamchi agentlar: **RAG**, **DocViewer** (boshqalar keyin).
 
 ```text
 Open WebUI → Gateway → POST /v1/chat
@@ -9,6 +9,7 @@ Open WebUI → Gateway → POST /v1/chat
                → RAG helper → Chroma (PDF / Word / FAQ)
 
 Direct RAG (no host): POST /v1/docs/chat
+DocViewer (JSON in):  POST /v1/docviewer/run
 ```
 
 ## Why this design
@@ -51,6 +52,7 @@ RAG_EMBED_URL=http://host.docker.internal:8090
 | Method | Path | Role |
 |--------|------|------|
 | POST | `/v1/chat` | QXAudit host chat (`session_id` for memory) |
+| POST | `/v1/chat/completions` | OpenAI-compatible (Open WebUI Gateway Accounting, etc.) |
 | GET | `/ready` | QXAudit host + RAG ready |
 | GET | `/v1/info` | Architecture metadata (+ helpers) |
 | POST | `/v1/docs/chat` | Document RAG Q&A |
@@ -58,6 +60,39 @@ RAG_EMBED_URL=http://host.docker.internal:8090
 | GET | `/v1/docs/ready` | RAG ready |
 | GET | `/v1/docs/info` | RAG config + stats |
 | GET | `/v1/docs/files` | Files under `RAG_DOCS_DIR` |
+| GET | `/v1/self-improve` | Learned Q/A recipe store stats |
+| POST | `/v1/docviewer/run` | DocViewer: JSON document + tools |
+| GET | `/v1/docviewer/info` | DocViewer agent + tool list |
+| GET | `/v1/docviewer/tools` | Registered DocViewer tools |
+| GET | `/v1/docviewer/ready` | DocViewer ready |
+
+### Session id (Open WebUI)
+
+- Preferred path: Gateway agent with `api_style: message` + `POST /v1/chat`  
+  (Accounting is configured this way so `session_id` / chat id is forwarded).
+- OpenAI path `POST /v1/chat/completions` also accepts:
+  - body `session_id` / `chat_id`
+  - headers `X-OpenWebUI-Chat-Id`, `X-Session-Id`
+  - fallback: stable fingerprint of first user message in the thread
+
+### Self-improving
+
+Successful Q→A pairs are stored in `data/self_improve.json` (global).  
+Similar past answers are injected as few-shot hints into the host prompt  
+(`SELF_IMPROVE_*` env). Inspect: `GET /v1/self-improve`.
+
+### DocViewer (primitive)
+
+JSON document agent under `QXAudit.docviewer`. Tools (stubs for now):
+
+- `metadata_extractor` — Metadata Extractor Tool  
+- `knowledge_graph_builder` — Knowledge Graph Builder Tool  
+
+```bash
+curl -X POST http://127.0.0.1:9090/v1/docviewer/run \
+  -H "Content-Type: application/json" \
+  -d "{\"document\":{\"title\":\"demo\",\"pages\":1},\"run_all\":true}"
+```
 
 ## Document RAG + Document Intelligence
 
@@ -115,7 +150,12 @@ agents/
   embeddings.py       # get_embeddings() from env only
   rag_agent.py        # RAG helper: PDF/Word → Chroma → answer
   rag_bridge_tool.py  # docs_ask tool
+  docviewer_agent.py  # DocViewer helper: JSON dispatch
   doc_structure.py    # document structure helpers
+tools/
+  docviewer/          # DocViewer tools (separate from agents/)
+    metadata_extractor.py
+    knowledge_graph_builder.py
 prompts/
   hermes_coordinator.md   # QXAudit host system prompt
   rag_agent_system.md     # RAG helper prompt

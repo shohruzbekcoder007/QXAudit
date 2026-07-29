@@ -34,8 +34,9 @@ qxaudit = "app.main:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["agents", "app"]
+packages = ["agents", "app", "tools", "tools.docviewer"]
 
 [tool.setuptools.package-dir]
 agents = "agents"
 app = "app"
+tools = "tools"

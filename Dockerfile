@@ -34,6 +34,7 @@ RUN pip install --upgrade pip setuptools wheel \
 COPY requirements.txt pyproject.toml README.md ./
 COPY agents ./agents
 COPY app ./app
+COPY tools ./tools
 
 RUN pip install -r requirements.txt \
     && pip install .
@@ -78,6 +79,7 @@ WORKDIR /app
 
 COPY --chown=appuser:appuser agents ./agents
 COPY --chown=appuser:appuser app ./app
+COPY --chown=appuser:appuser tools ./tools
 COPY --chown=appuser:appuser prompts ./prompts
 COPY --chown=appuser:appuser config ./config
 COPY --chown=appuser:appuser scripts ./scripts
