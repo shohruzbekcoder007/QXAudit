@@ -10,6 +10,7 @@ Open WebUI → Gateway → POST /v1/chat
 
 Direct RAG (no host): POST /v1/docs/chat
 DocViewer (JSON in):  POST /v1/docviewer/run
+Graph (Neo4j templates): POST /v1/graph/ask  ·  host tool graph_ask
 ```
 
 ## Why this design
@@ -53,6 +54,9 @@ RAG_EMBED_URL=http://host.docker.internal:8090
 |--------|------|------|
 | POST | `/v1/chat` | QXAudit host chat (`session_id` for memory) |
 | POST | `/v1/chat/completions` | OpenAI-compatible (Open WebUI Gateway Accounting, etc.) |
+| POST | `/v1/graph/ask` | Neo4j template query (`graph_ask`: intent + name/code/number) |
+| GET | `/v1/graph/ready` | Neo4j connectivity |
+| GET | `/v1/graph/intents` | Allowed graph intents |
 | GET | `/ready` | QXAudit host + RAG ready |
 | GET | `/v1/info` | Architecture metadata (+ helpers) |
 | POST | `/v1/docs/chat` | Document RAG Q&A |
@@ -175,11 +179,12 @@ agents/
   rag_agent.py        # RAG helper: PDF/Word → Chroma → answer
   rag_bridge_tool.py  # docs_ask tool
   docviewer_agent.py  # DocViewer helper: JSON dispatch
+  graph_bridge_tool.py # graph_ask host tool
+  neo4j_client.py     # Bolt client
   doc_structure.py    # document structure helpers
 tools/
-  docviewer/          # DocViewer tools (separate from agents/)
-    metadata_extractor.py
-    knowledge_graph_builder.py
+  docviewer/          # DocViewer tools
+  graph/              # Neo4j Cypher templates (graph_ask)
 prompts/
   hermes_coordinator.md   # QXAudit host system prompt
   rag_agent_system.md     # RAG helper prompt

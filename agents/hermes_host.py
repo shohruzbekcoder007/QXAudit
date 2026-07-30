@@ -135,6 +135,15 @@ class HermesHostService:
                 logger.debug("register_docs_tools: %s", exc)
 
             try:
+                from agents.graph_bridge_tool import (
+                    register_hermes_tools as register_graph_tools,
+                )
+
+                register_graph_tools()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("register_graph_tools: %s", exc)
+
+            try:
                 from hermes_cli.plugins import discover_plugins  # type: ignore
 
                 discover_plugins()
@@ -208,20 +217,37 @@ class HermesHostService:
         return kwargs
 
     def _enabled_toolsets(self) -> list[str]:
-        """Parse HERMES_ENABLED_TOOLSETS; default docs_bridge only."""
-        raw = _env("HERMES_ENABLED_TOOLSETS") or "docs_bridge"
+        """Parse HERMES_ENABLED_TOOLSETS; default docs + graph."""
+        raw = _env("HERMES_ENABLED_TOOLSETS") or "docs_bridge,graph_bridge"
         sets = [t.strip() for t in raw.split(",") if t.strip()]
         # Drop legacy SQL toolset if still listed in env
         sets = [s for s in sets if s not in {"sql_bridge", "sql-bridge"}]
         if "docs_bridge" not in sets:
             sets.append("docs_bridge")
-        return sets or ["docs_bridge"]
+        if "graph_bridge" not in sets:
+            try:
+                from agents.neo4j_client import is_enabled as neo4j_on
+
+                if neo4j_on():
+                    sets.append("graph_bridge")
+            except Exception:  # noqa: BLE001
+                sets.append("graph_bridge")
+        return sets or ["docs_bridge", "graph_bridge"]
 
     def _host_langchain_tools(self) -> list[Any]:
-        """docs_ask only."""
+        """docs_ask + graph_ask (when Neo4j enabled)."""
         from agents.rag_bridge_tool import as_langchain_tool as docs_tool
 
-        return [docs_tool()]
+        tools: list[Any] = [docs_tool()]
+        try:
+            from agents.graph_bridge_tool import as_langchain_tool as graph_tool
+            from agents.neo4j_client import is_enabled as neo4j_on
+
+            if neo4j_on():
+                tools.append(graph_tool())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("graph_ask tool not added: %s", exc)
+        return tools
 
     def _try_init_hermes_lite(self) -> bool:
         try:
@@ -291,18 +317,25 @@ class HermesHostService:
             "host": "QXAudit",
             "agent": "QXAudit",
             "architecture": (
-                "QXAudit host (memory/context) → tool docs_ask → "
-                "RAG helper → Chroma"
+                "QXAudit host → docs_ask (RAG/Chroma) + graph_ask (Neo4j templates)"
             ),
             "model": self.model_name,
             "skip_memory": self.skip_memory,
             "session_count": len(self._sessions),
-            "helpers": {"rag": rag_rd},
+            "helpers": {"rag": rag_rd, "graph": self._graph_readiness()},
             "rag_agent": rag_rd,
             "error": self._last_error,
-            "tool": "docs_ask",
-            "toolset": "docs_bridge",
+            "tools": ["docs_ask", "graph_ask"],
+            "toolsets": self._enabled_toolsets(),
         }
+
+    def _graph_readiness(self) -> dict[str, Any]:
+        try:
+            from agents.neo4j_client import readiness as neo4j_ready
+
+            return neo4j_ready()
+        except Exception as exc:  # noqa: BLE001
+            return {"ready": False, "error": str(exc)}
 
     def clear_session(self, session_id: str) -> None:
         with _lock:
@@ -493,7 +526,7 @@ class HermesHostService:
             "error": None,
             "session_id": sid,
             "backend": "hermes",
-            "agents_used": ["QXAudit", "docs_ask"],
+            "agents_used": ["QXAudit", "docs_ask|graph_ask"],
             "mode": "qxaudit_tool_host",
         }
 
@@ -555,14 +588,17 @@ class HermesHostService:
             with _lock:
                 self._sessions[sid] = new_hist
 
-        # Count docs_ask tool calls
+        # Count tool calls
         tool_hits = 0
+        tools_seen: list[str] = []
         for m in out_msgs or []:
             tcs = getattr(m, "tool_calls", None) or []
             for tc in tcs:
                 name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
-                if name == "docs_ask":
+                if name in {"docs_ask", "graph_ask"}:
                     tool_hits += 1
+                    if name not in tools_seen:
+                        tools_seen.append(str(name))
 
         return {
             "success": bool((final or "").strip()),
@@ -571,8 +607,8 @@ class HermesHostService:
             "session_id": sid,
             "backend": "hermes_lite",
             "tool_call_count": tool_hits,
-            "agents_used": ["QXAudit", "docs_ask→rag"],
-            "mode": "qxaudit_tool_rag",
+            "agents_used": ["QXAudit"] + (tools_seen or ["docs_ask|graph_ask"]),
+            "mode": "qxaudit_tool_hybrid",
         }
 
 

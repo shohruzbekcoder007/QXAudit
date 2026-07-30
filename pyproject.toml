@@ -27,6 +27,7 @@ dependencies = [
   "pypdf>=5.0.0,<6.0.0",
   "python-docx>=1.1.0,<2.0.0",
   "langchain-text-splitters>=0.3.0,<1.0.0",
+  "neo4j>=5.0.0,<6.0.0",
 ]
 
 [project.scripts]
@@ -34,7 +35,7 @@ qxaudit = "app.main:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["agents", "app", "tools", "tools.docviewer"]
+packages = ["agents", "app", "tools", "tools.docviewer", "tools.graph"]
 
 [tool.setuptools.package-dir]
 agents = "agents"

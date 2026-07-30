@@ -754,6 +754,49 @@ def create_app() -> FastAPI:
 
         return self_improve.stats()
 
+    @app.get("/v1/graph/ready")
+    def graph_ready() -> dict[str, Any]:
+        from agents.neo4j_client import readiness
+
+        rd = readiness()
+        if not rd.get("ready"):
+            raise HTTPException(
+                status_code=503,
+                detail={"status": "not_ready", "neo4j": rd},
+            )
+        return {"status": "ready", "neo4j": rd}
+
+    @app.get("/v1/graph/intents")
+    def graph_intents() -> dict[str, Any]:
+        from tools.graph import list_intents
+
+        return {"tool": "graph_ask", "intents": list_intents()}
+
+    class GraphAskRequest(BaseModel):
+        question: str = Field(default="", description="User question")
+        intent: str = Field(default="auto")
+        name: str = Field(default="")
+        code: str = Field(default="")
+        number: Optional[int] = Field(default=None)
+
+    @app.post("/v1/graph/ask")
+    def graph_ask_api(
+        body: GraphAskRequest,
+        _: None = Depends(_check_bearer),
+    ) -> dict[str, Any]:
+        """Direct graph_ask (template Cypher) — debug / clients without host."""
+        from tools.graph.service import format_for_host, graph_ask
+
+        result = graph_ask(
+            question=body.question,
+            intent=body.intent or "auto",
+            name=body.name,
+            code=body.code,
+            number=body.number,
+        )
+        result["text"] = format_for_host(result)
+        return result
+
     @app.post("/v1/chat/completions")
     def chat_completions(
         body: OpenAIChatCompletionsRequest,

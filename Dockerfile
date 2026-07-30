@@ -35,6 +35,7 @@ COPY requirements.txt pyproject.toml README.md ./
 COPY agents ./agents
 COPY app ./app
 COPY tools ./tools
+# tools/ includes docviewer + graph packages
 
 RUN pip install -r requirements.txt \
     && pip install .

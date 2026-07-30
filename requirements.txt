@@ -21,3 +21,6 @@ pypdf>=5.0.0,<6.0.0
 python-docx>=1.1.0,<2.0.0
 langchain-text-splitters>=0.3.0,<1.0.0
 # Optional local models (BAAI/bge-m3): pip install -r requirements-rag-local.txt
+
+# Neo4j (graph_ask / knowledge graph)
+neo4j>=5.0.0,<6.0.0
