@@ -142,6 +142,30 @@ curl http://127.0.0.1:9090/health
 
 Container / image: `qxaudit`. Network: `qxaudit-net`. Volume: `qxaudit-rag-chroma`.
 
+### Neo4j (graph store)
+
+Compose service **`neo4j`** (`qxaudit-neo4j`) — persistent volumes for the graph.
+Agent/tool wiring comes later; the DB is ready to use now.
+
+| | |
+|--|--|
+| Browser UI | http://127.0.0.1:7474 |
+| Bolt (host) | `bolt://127.0.0.1:7687` |
+| Bolt (from app) | `bolt://neo4j:7687` |
+| User / password | `NEO4J_USER` / `NEO4J_PASSWORD` in `.env` |
+
+Volumes: `qxaudit-neo4j-data`, `qxaudit-neo4j-logs`, `qxaudit-neo4j-import`, `qxaudit-neo4j-plugins`.
+
+```bash
+# Start / check
+docker compose up -d neo4j
+docker compose ps neo4j
+docker compose logs -f neo4j
+```
+
+First browser login: user `neo4j`, password from `.env` (`NEO4J_PASSWORD`).  
+On first connect Neo4j may ask you to set a new password if auth policy requires it — keep `.env` in sync.
+
 ## Layout
 
 ```text
