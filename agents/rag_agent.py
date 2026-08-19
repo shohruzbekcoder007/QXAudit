@@ -1221,16 +1221,13 @@ class RAGAgentService:
         from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        model = (
-            _env("RAG_LLM_MODEL")
-            or _env("LLM_MODEL")
-            or _env("OPENAI_MODEL")
-            or "gpt-4.1"
-        )
-        api_key = (
-            _env("OPENAI_API_KEY") or _env("LLM_API_KEY") or _env("HERMES_API_KEY")
-        )
-        base_url = _env("OPENAI_BASE_URL") or None
+        from agents.llm_config import get_llm_settings
+
+        llm_cfg = get_llm_settings()
+        # RAG_LLM_MODEL stays as an explicit override for either provider
+        model = _env("RAG_LLM_MODEL") or llm_cfg["model"]
+        api_key = llm_cfg["api_key"]
+        base_url = llm_cfg["base_url"]
         kwargs: dict[str, Any] = {
             "model": model,
             "api_key": api_key,

@@ -75,11 +75,15 @@ class HermesHostService:
     name = "QXAudit"
 
     def __init__(self) -> None:
-        self.model_name = (
-            _env("HERMES_MODEL") or _env("LLM_MODEL") or _env("OPENAI_MODEL") or "gpt-4.1"
-        )
-        self.api_key = _env("OPENAI_API_KEY") or _env("LLM_API_KEY") or _env("HERMES_API_KEY")
-        self.base_url = _env("OPENAI_BASE_URL") or _env("HERMES_BASE_URL") or None
+        from agents.llm_config import get_llm_settings
+
+        llm = get_llm_settings()
+        self.llm_provider = llm["provider"]
+        # HERMES_MODEL / HERMES_BASE_URL stay as explicit overrides
+        self.model_name = _env("HERMES_MODEL") or llm["model"]
+        self.api_key = llm["api_key"]
+        self.base_url = _env("HERMES_BASE_URL") or llm["base_url"]
+        self.task_model = llm["task_model"]
         self.max_iterations = _env_int("HERMES_MAX_ITERATIONS", 12)
         self.session_limit = _env_int("HERMES_SESSION_HISTORY_LIMIT", 6)
         self.skip_memory = _env_bool("HERMES_SKIP_MEMORY", False)
@@ -105,7 +109,10 @@ class HermesHostService:
                 return self.readiness()
 
             if not self.api_key:
-                self._last_error = "OPENAI_API_KEY / HERMES_API_KEY not set"
+                self._last_error = (
+                    f"LLM api_key not set (provider={self.llm_provider}; "
+                    "openai: OPENAI_API_KEY, ollama: avtomatik)"
+                )
                 self._ready = False
                 return self.readiness()
 
@@ -422,6 +429,8 @@ class HermesHostService:
                 "QXAudit host → docs_ask (RAG/Chroma) + graph_ask (Neo4j templates)"
             ),
             "model": self.model_name,
+            "llm_provider": self.llm_provider,
+            "llm_base_url": self.base_url,
             "skip_memory": self.skip_memory,
             "session_count": len(self._sessions),
             "helpers": {"rag": rag_rd, "graph": self._graph_readiness()},
@@ -645,7 +654,7 @@ class HermesHostService:
             "(chat title, tags, follow-up suggestion generation). Follow the "
             "task's requested output format exactly. No commentary."
         )
-        task_model = _env("HERMES_TASK_MODEL") or "gpt-4.1-mini"
+        task_model = self.task_model or self.model_name
         last_error: str | None = None
         for model in dict.fromkeys([task_model, self.model_name]):
             try:
