@@ -11,6 +11,7 @@ Open WebUI → Gateway → POST /v1/chat
 Direct RAG (no host): POST /v1/docs/chat
 DocViewer (JSON in):  POST /v1/docviewer/run
 Graph (Neo4j templates): POST /v1/graph/ask  ·  host tool graph_ask
+Reconcile (deterministic): POST /v1/graph/reconcile  ·  host tool reconcile_check
 ```
 
 ## Why this design
@@ -57,6 +58,8 @@ RAG_EMBED_URL=http://host.docker.internal:8090
 | POST | `/v1/graph/ask` | Neo4j template query (`graph_ask`: intent + name/code/number) |
 | GET | `/v1/graph/ready` | Neo4j connectivity |
 | GET | `/v1/graph/intents` | Allowed graph intents |
+| POST | `/v1/graph/reconcile` | Deterministic identity checks (`reconcile_check`) |
+| GET | `/v1/graph/checks` | Allowed reconcile checks |
 | GET | `/ready` | QXAudit host + RAG ready |
 | GET | `/v1/info` | Architecture metadata (+ helpers) |
 | POST | `/v1/docs/chat` | Document RAG Q&A |

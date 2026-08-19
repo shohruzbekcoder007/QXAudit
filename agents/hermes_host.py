@@ -146,8 +146,12 @@ class HermesHostService:
                 from agents.graph_bridge_tool import (
                     register_hermes_tools as register_graph_tools,
                 )
+                from agents.reconcile_bridge_tool import (
+                    register_hermes_tools as register_reconcile_tools,
+                )
 
                 register_graph_tools()
+                register_reconcile_tools()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("register_graph_tools: %s", exc)
 
@@ -329,6 +333,14 @@ class HermesHostService:
                 tools.append(graph_tool())
             except Exception as exc:  # noqa: BLE001
                 logger.warning("graph_ask tool not added: %s", exc)
+            try:
+                from agents.reconcile_bridge_tool import (
+                    as_langchain_tool as reconcile_tool,
+                )
+
+                tools.append(reconcile_tool())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("reconcile_check tool not added: %s", exc)
         return tools
 
     def _try_init_hermes_lite(self) -> bool:
@@ -434,7 +446,8 @@ class HermesHostService:
             )
         if not self._graph_ready:
             missing.append(
-                "`graph_ask` (bilim grafi) hozir MAVJUD EMAS — uni chaqirma. "
+                "`graph_ask` va `reconcile_check` (bilim grafi) hozir MAVJUD EMAS — "
+                "ularni chaqirma. "
                 "Hujjat matni bilan javob ber va aniq raqam/formulani grafdan "
                 "tasdiqlab bo'lmasligini foydalanuvchiga ayt."
             )
@@ -447,7 +460,7 @@ class HermesHostService:
         if self._rag_ready:
             names.append("docs_ask")
         if self._graph_ready:
-            names.append("graph_ask")
+            names.extend(["graph_ask", "reconcile_check"])
         return names
 
     def _graph_readiness(self) -> dict[str, Any]:
@@ -721,7 +734,7 @@ class HermesHostService:
             tcs = getattr(m, "tool_calls", None) or []
             for tc in tcs:
                 name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
-                if name in {"docs_ask", "graph_ask"}:
+                if name in {"docs_ask", "graph_ask", "reconcile_check"}:
                     tool_hits += 1
                     if name not in tools_seen:
                         tools_seen.append(str(name))

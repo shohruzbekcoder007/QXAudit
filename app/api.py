@@ -122,6 +122,33 @@ class DocViewerResponse(BaseModel):
     retryable: Optional[bool] = None
 
 
+class GraphAskRequest(BaseModel):
+    """POST /v1/graph/ask body.
+
+    NOTE: must be module-level — with `from __future__ import annotations`,
+    FastAPI cannot resolve models defined inside create_app() and silently
+    treats the body as a query parameter.
+    """
+
+    question: str = Field(default="", description="User question")
+    intent: str = Field(default="auto")
+    name: str = Field(default="")
+    code: str = Field(default="")
+    number: Optional[int] = Field(default=None)
+
+
+class ReconcileRequest(BaseModel):
+    """POST /v1/graph/reconcile body (module-level for the same reason)."""
+
+    checks: Optional[list[str]] = Field(
+        default=None,
+        description="Subset of checks to run; omit for all",
+    )
+    tolerance_mlrd: float = Field(default=0.5)
+    tolerance_percent: float = Field(default=0.2)
+    period: str = Field(default="")
+
+
 # --- OpenAI-compatible (Open WebUI Gateway Accounting → /v1/chat/completions) ---
 
 
@@ -798,13 +825,6 @@ def create_app() -> FastAPI:
 
         return {"tool": "graph_ask", "intents": list_intents()}
 
-    class GraphAskRequest(BaseModel):
-        question: str = Field(default="", description="User question")
-        intent: str = Field(default="auto")
-        name: str = Field(default="")
-        code: str = Field(default="")
-        number: Optional[int] = Field(default=None)
-
     @app.post("/v1/graph/ask")
     def graph_ask_api(
         body: GraphAskRequest,
@@ -819,6 +839,29 @@ def create_app() -> FastAPI:
             name=body.name,
             code=body.code,
             number=body.number,
+        )
+        result["text"] = format_for_host(result)
+        return result
+
+    @app.get("/v1/graph/checks")
+    def graph_checks() -> dict[str, Any]:
+        from tools.graph import list_checks
+
+        return {"tool": "reconcile_check", "checks": list_checks()}
+
+    @app.post("/v1/graph/reconcile")
+    def graph_reconcile(
+        body: ReconcileRequest,
+        _: None = Depends(_check_bearer),
+    ) -> dict[str, Any]:
+        """Deterministic reconciliation of the YaICh figures (no LLM involved)."""
+        from tools.graph.reconcile import format_for_host, reconcile_check
+
+        result = reconcile_check(
+            checks=body.checks,
+            tolerance_mlrd=body.tolerance_mlrd,
+            tolerance_percent=body.tolerance_percent,
+            period=body.period,
         )
         result["text"] = format_for_host(result)
         return result
