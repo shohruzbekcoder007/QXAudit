@@ -108,6 +108,7 @@ def graph_ask_handler(args: dict[str, Any] | None = None, **kwargs: Any) -> str:
             "rows": result.get("rows"),
             "candidates": result.get("candidates"),
             "error": result.get("error"),
+            "error_code": result.get("error_code"),
         }
         return text + "\n\n" + json.dumps(payload, ensure_ascii=False, default=str)
     except Exception as exc:  # noqa: BLE001

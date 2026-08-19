@@ -341,6 +341,27 @@ def _check_bearer(
         )
 
 
+def _warn_on_open_access() -> None:
+    """
+    Make an unauthenticated deployment impossible to miss in the logs.
+
+    QXAudit serves unpublished statistical figures; running it without a bearer
+    token and with a wildcard CORS origin exposes them to anyone who can reach
+    the port. We warn rather than refuse to start so existing deployments keep
+    running, but the operator has to see it.
+    """
+    if not os.getenv("API_BEARER_TOKEN", "").strip():
+        logger.warning(
+            "SECURITY: API_BEARER_TOKEN is not set — /v1/chat, /v1/graph/ask and "
+            "/v1/docs/* accept unauthenticated requests. Set it in .env."
+        )
+    if _cors_origins() == ["*"]:
+        logger.warning(
+            "SECURITY: CORS_ORIGINS=* — any origin may call this API from a "
+            "browser. Set an explicit origin list in .env."
+        )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title=os.getenv("APP_NAME", "QXAudit"),
@@ -365,6 +386,7 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def _startup() -> None:
         logger.info("Starting QXAudit service v%s", __version__)
+        _warn_on_open_access()
         try:
             from agents.hermes_host import get_hermes_host
 
@@ -453,7 +475,9 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/v1/docs/files")
-    def docs_files() -> dict[str, Any]:
+    def docs_files(
+        _: None = Depends(_check_bearer),
+    ) -> dict[str, Any]:
         from agents.rag_agent import get_rag_agent
 
         return get_rag_agent().list_files()
@@ -748,7 +772,9 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/v1/self-improve")
-    def self_improve_stats() -> dict[str, Any]:
+    def self_improve_stats(
+        _: None = Depends(_check_bearer),
+    ) -> dict[str, Any]:
         """Global learned Q/A recipe store stats."""
         from agents import self_improve
 

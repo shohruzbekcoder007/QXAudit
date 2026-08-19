@@ -78,6 +78,46 @@ def _now_iso() -> str:
 
 _TOKEN_RE = re.compile(r"[\w\u0400-\u04FF\u0500-\u052F]+", re.UNICODE)
 
+# Open WebUI sends its own housekeeping prompts (title generation, follow-up
+# suggestions, tagging) through the same chat endpoint. Learning those poisons
+# the store and re-injects them into the system prompt as few-shot examples.
+_META_MARKERS = (
+    "### task:",
+    "### guidelines:",
+    "### output:",
+    "<chat_history>",
+    "json format:",
+    "generate a concise",
+    "generate 1-3 broad tags",
+    "suggest 3-5 relevant",
+    "summarizing the chat history",
+    "you are an assistant tasked with",
+)
+
+# Instruction-shaped text must never enter the prompt as a learned example.
+_INJECTION_MARKERS = (
+    "ignore previous",
+    "ignore all previous",
+    "disregard the above",
+    "oldingi ko'rsatmalarni",
+    "oldingi korsatmalarni",
+    "system prompt",
+    "you are now",
+    "act as",
+)
+
+def is_meta_prompt(question: str) -> bool:
+    """True for client housekeeping prompts and instruction-shaped text."""
+    q = (question or "").strip()
+    if not q:
+        return True
+    if len(q) > _env_int("SELF_IMPROVE_MAX_QUESTION_CHARS", 300):
+        return True
+    low = q.lower()
+    return any(m in low for m in _META_MARKERS) or any(
+        m in low for m in _INJECTION_MARKERS
+    )
+
 
 def _tokens(text: str) -> set[str]:
     return {t.lower() for t in _TOKEN_RE.findall(text or "") if len(t) > 1}
@@ -119,10 +159,12 @@ class RecipeStore:
             else:
                 recipes = []
             self.recipes = [r for r in (recipes or []) if isinstance(r, dict)]
+            removed = self.purge_meta_recipes()
             logger.info(
-                "self_improve store loaded: %d recipes from %s",
+                "self_improve store loaded: %d recipes from %s (purged %d meta)",
                 len(self.recipes),
                 self.path,
+                removed,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("self_improve load failed (%s): %s", self.path, exc)
@@ -145,6 +187,23 @@ class RecipeStore:
         except Exception as exc:  # noqa: BLE001
             logger.warning("self_improve save failed (%s): %s", self.path, exc)
 
+    def purge_meta_recipes(self) -> int:
+        """
+        Drop client housekeeping prompts already persisted by earlier versions.
+
+        Runs on load so an existing poisoned store heals itself on restart.
+        """
+        before = len(self.recipes)
+        kept = [
+            r for r in self.recipes
+            if not is_meta_prompt(str(r.get("question") or ""))
+        ]
+        removed = before - len(kept)
+        if removed:
+            self.recipes = kept
+            self._save()
+        return removed
+
     def stats(self) -> dict[str, Any]:
         return {
             "enabled": is_enabled(),
@@ -166,6 +225,9 @@ class RecipeStore:
         q = (question or "").strip()
         a = (answer or "").strip()
         if len(q) < 4 or len(a) < 8:
+            return False
+        if is_meta_prompt(q):
+            logger.debug("self_improve: skipped meta prompt q=%r", q[:60])
             return False
         # Skip obvious failures / empty / error-ish answers
         low = a.lower()
@@ -240,6 +302,9 @@ class RecipeStore:
     def retrieve(self, question: str) -> list[dict[str, Any]]:
         q = (question or "").strip()
         if not q or not self.recipes:
+            return []
+        if is_meta_prompt(q):
+            # Client housekeeping call — no domain few-shot needed.
             return []
         top_k = _env_int("SELF_IMPROVE_TOP_K", 3)
         min_score = _env_float("SELF_IMPROVE_MIN_SCORE", 0.18)

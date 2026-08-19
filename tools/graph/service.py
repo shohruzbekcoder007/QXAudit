@@ -246,6 +246,52 @@ def _resolve_indicators(run_cypher, *, name: str, code: str, limit: int) -> list
     )
 
 
+def _pick_indicator(
+    candidates: list[dict[str, Any]],
+    *,
+    intent: str,
+    name: str,
+    code: str,
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    """
+    Choose exactly one indicator, or refuse and ask the user.
+
+    Never silently takes candidates[0]: a wrong pick returns a plausible but
+    wrong number, which the user cannot detect.
+
+    Returns (picked, ambiguous_result) — exactly one of the two is not None.
+    """
+    if code:
+        for c in candidates:
+            if str(c.get("code") or "") == code:
+                return c, None
+    if len(candidates) == 1:
+        return candidates[0], None
+
+    # Exact name match wins over substring matches ("Sut" vs "Sut mahsulotlari")
+    wanted = (name or "").strip().lower()
+    if wanted:
+        exact = [
+            c for c in candidates
+            if str(c.get("name") or "").strip().lower() == wanted
+        ]
+        if len(exact) == 1:
+            return exact[0], None
+
+    return None, {
+        "success": False,
+        "error": (
+            f"{len(candidates)} ta ko'rsatkich mos keldi — qaysi biri kerakligini "
+            "foydalanuvchidan so'rang (o'zingiz tanlamang)."
+        ),
+        "error_code": "ambiguous",
+        "intent": intent,
+        "candidates": candidates,
+        "rows": [],
+        "agent": "QXAudit.graph",
+    }
+
+
 def _run_indicator_formula(
     run_cypher, *, name: str, code: str, question: str, limit: int
 ) -> dict[str, Any]:
@@ -266,15 +312,12 @@ def _run_indicator_formula(
             "intent": "indicator_formula",
             "rows": [],
         }
-    # Prefer exact code match, else first candidate
-    pick = None
-    if code:
-        for c in candidates:
-            if str(c.get("code") or "") == code:
-                pick = c
-                break
-    pick = pick or candidates[0]
-    use_code = str(pick.get("code") or "")
+    pick, ambiguous = _pick_indicator(
+        candidates, intent="indicator_formula", name=name, code=code
+    )
+    if ambiguous is not None:
+        return ambiguous
+    use_code = str((pick or {}).get("code") or "")
 
     cypher = """
     MATCH (i:Indicator {code: $code})
@@ -287,26 +330,20 @@ def _run_indicator_formula(
            i.osish_foiz AS osish_foiz,
            i.deflyator_foiz AS deflyator_foiz,
            f.code AS formula_code,
-           coalesce(f.expression, f.formula, f.name) AS formula,
-           f.izoh AS formula_izoh,
+           coalesce(f.ifoda, f.name) AS formula,
+           f.mazmun AS formula_mazmun,
+           f.turi AS formula_turi,
            p.number AS band, p.title AS band_title,
            u.name AS unit
     LIMIT $limit
     """
     rows = run_cypher(cypher, {"code": use_code, "limit": limit})
-    out = _ok(
+    return _ok(
         "indicator_formula",
         cypher_name="indicator_uses_formula",
         params={"code": use_code, "name": name},
         rows=rows,
     )
-    if len(candidates) > 1:
-        out["candidates"] = candidates
-        out["message"] = (
-            f"Bir nechta ko'rsatkich topildi; birinchisi ishlatildi: {use_code}. "
-            "Aniqroq code= yuboring."
-        )
-    return out
 
 
 def _run_indicator_definition(
@@ -327,7 +364,12 @@ def _run_indicator_definition(
             "error_code": "not_found",
             "intent": "indicator_definition",
         }
-    use_code = str(candidates[0].get("code") or code)
+    pick, ambiguous = _pick_indicator(
+        candidates, intent="indicator_definition", name=name, code=code
+    )
+    if ambiguous is not None:
+        return ambiguous
+    use_code = str((pick or {}).get("code") or code)
     cypher = """
     MATCH (i:Indicator {code: $code})-[:DEFINED_IN]->(p:Paragraph)
     OPTIONAL MATCH (p)-[:BELONGS_TO]->(m:Methodology)
@@ -337,15 +379,12 @@ def _run_indicator_definition(
     LIMIT $limit
     """
     rows = run_cypher(cypher, {"code": use_code, "limit": limit})
-    out = _ok(
+    return _ok(
         "indicator_definition",
         cypher_name="indicator_defined_in",
         params={"code": use_code},
         rows=rows,
     )
-    if len(candidates) > 1:
-        out["candidates"] = candidates
-    return out
 
 
 def _run_calc_chain(
@@ -366,7 +405,12 @@ def _run_calc_chain(
             "error_code": "not_found",
             "intent": "calc_chain",
         }
-    use_code = str(candidates[0].get("code") or code)
+    pick, ambiguous = _pick_indicator(
+        candidates, intent="calc_chain", name=name, code=code
+    )
+    if ambiguous is not None:
+        return ambiguous
+    use_code = str((pick or {}).get("code") or code)
     cypher = """
     MATCH (i:Indicator {code: $code})
     OPTIONAL MATCH (i)-[:CALCULATED_FROM]->(part:Indicator)
@@ -392,18 +436,24 @@ def _run_sources(
     run_cypher, *, name: str, code: str, question: str, limit: int
 ) -> dict[str, Any]:
     q = name or question or code
+    # Form codes are written with a space in the graph ("4 dx") but users type
+    # "4dx" — compare with spaces removed on both sides.
     cypher = """
     MATCH (s:Source)
     WHERE ($q <> '' AND (
          toLower(coalesce(s.name, '')) CONTAINS toLower($q)
       OR toLower(coalesce(s.code, '')) CONTAINS toLower($q)
-      OR toLower(coalesce(s.izoh, '')) CONTAINS toLower($q)
+      OR toLower(coalesce(s.qamrov, '')) CONTAINS toLower($q)
+      OR replace(toLower(coalesce(s.shakl, '')), ' ', '')
+         CONTAINS replace(toLower($q), ' ', '')
     )) OR ($code <> '' AND s.code = $code)
     OPTIONAL MATCH (s)-[:COLLECTED_BY]->(o:Organization)
     OPTIONAL MATCH (c:Column)-[:SOURCE_FROM]->(s)
     OPTIONAL MATCH (t:Table)-[:HAS_COLUMN]->(c)
     RETURN s.code AS source_code, s.name AS source_name,
-           o.name AS organization,
+           s.shakl AS shakl, s.davriylik AS davriylik,
+           s.qamrov AS qamrov, s.asos_band AS asos_band,
+           coalesce(o.qisqa, o.name) AS organization,
            collect(DISTINCT t.name)[0..5] AS tables
     LIMIT $limit
     """
@@ -426,8 +476,8 @@ def _run_sources(
     OPTIONAL MATCH (s)-[:COLLECTED_BY]->(o:Organization)
     RETURN i.code AS indicator_code, i.name AS indicator_name,
            r.name AS report, t.name AS table,
-           s.code AS source_code, s.name AS source_name,
-           o.name AS organization
+           s.code AS source_code, s.name AS source_name, s.shakl AS shakl,
+           coalesce(o.qisqa, o.name) AS organization
     LIMIT $limit
     """
     rows2 = run_cypher(cypher2, {"q": q or "", "code": code or "", "limit": limit})
@@ -511,6 +561,21 @@ def _ok(
 
 def format_for_host(result: dict[str, Any]) -> str:
     """Plain text for the host LLM (never raw errors only)."""
+    if result.get("error_code") == "ambiguous":
+        lines = [
+            "graph_ask: SAVOL ANIQ EMAS — javob berilmadi.",
+            str(result.get("error") or ""),
+            "Variantlar:",
+        ]
+        for i, c in enumerate(result.get("candidates") or [], 1):
+            qiymat = c.get("qiymat_2026")
+            extra = f" — {qiymat} mlrd so'm" if qiymat is not None else ""
+            lines.append(f"  {i}. {c.get('code')}: {c.get('name')}{extra}")
+        lines.append(
+            "Foydalanuvchidan qaysi birini nazarda tutganini so'rang va javobini "
+            "olgach graph_ask ni code= bilan qayta chaqiring. O'zingiz tanlamang."
+        )
+        return "\n".join(x for x in lines if x)
     if not result.get("success"):
         return (
             f"graph_ask xato: {result.get('error')} "

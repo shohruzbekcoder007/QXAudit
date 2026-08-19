@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -87,6 +88,13 @@ class HermesHostService:
         self._ready = False
         self._last_error: str | None = None
         self._sessions: dict[str, list[Any]] = {}
+        # Backends are independent: either one alone is enough to serve.
+        self._rag_ready = False
+        self._graph_ready = False
+        self._rag_error: str | None = None
+        self._graph_error: str | None = None
+        self._last_probe_ts = 0.0
+        self.recover_interval = _env_int("HERMES_RECOVER_INTERVAL_SECONDS", 60)
         # hermes_lite: langgraph graph; hermes: factory for AIAgent
         self._lite_graph: Any = None
         self._hermes_ok = False
@@ -101,30 +109,30 @@ class HermesHostService:
                 self._ready = False
                 return self.readiness()
 
-            # Warm RAG agent (tool target)
-            try:
-                from agents.rag_agent import get_rag_agent, is_enabled as rag_enabled
-
-                if not rag_enabled():
-                    self._last_error = "RAG disabled (RAG_ENABLED=false)"
-                    self._ready = False
-                    return self.readiness()
-
-                rag = get_rag_agent()
-                if not rag.ready:
-                    rag.initialize()
-                if not rag.ready:
-                    self._last_error = (
-                        "Inner RAG agent not ready: "
-                        f"{rag.readiness().get('error')}"
-                    )
-                    self._ready = False
-                    return self.readiness()
-            except Exception as exc:  # noqa: BLE001
-                self._last_error = f"RAG agent init failed: {exc}"
+            # Warm RAG agent (tool target). RAG is OPTIONAL: if the embedding
+            # service is down, docs_ask is dropped but graph_ask keeps working.
+            self._rag_ready = self._probe_rag()
+            self._graph_ready = self._probe_graph()
+            if not self._rag_ready and not self._graph_ready:
+                self._last_error = (
+                    "No knowledge backend available — "
+                    f"rag: {self._rag_error}; graph: {self._graph_error}"
+                )
                 self._ready = False
                 logger.error("%s", self._last_error)
                 return self.readiness()
+            if not self._rag_ready:
+                logger.warning(
+                    "QXAudit host starting WITHOUT docs_ask (RAG): %s — "
+                    "graph_ask only (degraded mode)",
+                    self._rag_error,
+                )
+            if not self._graph_ready:
+                logger.warning(
+                    "QXAudit host starting WITHOUT graph_ask (Neo4j): %s — "
+                    "docs_ask only (degraded mode)",
+                    self._graph_error,
+                )
 
             # Register Hermes tools if possible
             try:
@@ -174,6 +182,72 @@ class HermesHostService:
             self._last_error = self._last_error or "Failed to init QXAudit host"
             return self.readiness()
 
+    def _probe_rag(self) -> bool:
+        """Best-effort RAG warm-up. Never raises; records self._rag_error."""
+        self._rag_error = None
+        try:
+            from agents.rag_agent import get_rag_agent, is_enabled as rag_enabled
+
+            if not rag_enabled():
+                self._rag_error = "RAG disabled (RAG_ENABLED=false)"
+                return False
+            rag = get_rag_agent()
+            if not rag.ready:
+                rag.initialize()
+            if not rag.ready:
+                self._rag_error = str(
+                    rag.readiness().get("error") or "RAG agent not ready"
+                )
+                return False
+            return True
+        except BaseException as exc:  # noqa: BLE001 — Chroma can raise PanicException
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            self._rag_error = str(exc)
+            return False
+
+    def _probe_graph(self) -> bool:
+        """Best-effort Neo4j check. Never raises; records self._graph_error."""
+        self._graph_error = None
+        try:
+            from agents.neo4j_client import is_enabled as neo4j_on, readiness
+
+            if not neo4j_on():
+                self._graph_error = "Neo4j disabled (NEO4J_ENABLED=false)"
+                return False
+            rd = readiness()
+            if not rd.get("ready"):
+                self._graph_error = str(rd.get("error") or "Neo4j not ready")
+                return False
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._graph_error = str(exc)
+            return False
+
+    def _maybe_recover(self) -> None:
+        """
+        Re-attach a backend that came back online.
+
+        Probe rate is bounded by HERMES_RECOVER_INTERVAL_SECONDS so a permanently
+        dead service does not add latency to every chat turn.
+        """
+        if self._rag_ready and self._graph_ready:
+            return
+        now = time.monotonic()
+        if now - self._last_probe_ts < self.recover_interval:
+            return
+        self._last_probe_ts = now
+        before = (self._rag_ready, self._graph_ready)
+        after = (self._probe_rag(), self._probe_graph())
+        self._rag_ready, self._graph_ready = after
+        if after != before:
+            logger.info(
+                "Backend availability changed rag=%s→%s graph=%s→%s — rebuilding host",
+                before[0], after[0], before[1], after[1],
+            )
+            self._ready = False
+            self.initialize()
+
     def _try_init_hermes(self) -> bool:
         try:
             from run_agent import AIAgent  # type: ignore[import-not-found]
@@ -217,36 +291,44 @@ class HermesHostService:
         return kwargs
 
     def _enabled_toolsets(self) -> list[str]:
-        """Parse HERMES_ENABLED_TOOLSETS; default docs + graph."""
-        raw = _env("HERMES_ENABLED_TOOLSETS") or "docs_bridge,graph_bridge"
-        sets = [t.strip() for t in raw.split(",") if t.strip()]
-        # Drop legacy SQL toolset if still listed in env
-        sets = [s for s in sets if s not in {"sql_bridge", "sql-bridge"}]
-        if "docs_bridge" not in sets:
-            sets.append("docs_bridge")
-        if "graph_bridge" not in sets:
-            try:
-                from agents.neo4j_client import is_enabled as neo4j_on
+        """
+        Toolsets actually offered to the model.
 
-                if neo4j_on():
-                    sets.append("graph_bridge")
-            except Exception:  # noqa: BLE001
-                sets.append("graph_bridge")
-        return sets or ["docs_bridge", "graph_bridge"]
+        Only backends that answered a readiness probe are listed — advertising a
+        tool whose backend is down makes the model call it and fail.
+        """
+        raw = _env("HERMES_ENABLED_TOOLSETS") or "docs_bridge,graph_bridge"
+        wanted = [t.strip() for t in raw.split(",") if t.strip()]
+        # Drop legacy SQL toolset if still listed in env
+        wanted = [s for s in wanted if s not in {"sql_bridge", "sql-bridge"}]
+        sets: list[str] = []
+        if self._rag_ready and "docs_bridge" not in sets:
+            sets.append("docs_bridge")
+        if self._graph_ready and "graph_bridge" not in sets:
+            sets.append("graph_bridge")
+        # Keep any extra toolsets the operator configured explicitly
+        for s in wanted:
+            if s not in {"docs_bridge", "graph_bridge"} and s not in sets:
+                sets.append(s)
+        return sets
 
     def _host_langchain_tools(self) -> list[Any]:
-        """docs_ask + graph_ask (when Neo4j enabled)."""
-        from agents.rag_bridge_tool import as_langchain_tool as docs_tool
+        """docs_ask and/or graph_ask — only the backends that are actually up."""
+        tools: list[Any] = []
+        if self._rag_ready:
+            try:
+                from agents.rag_bridge_tool import as_langchain_tool as docs_tool
 
-        tools: list[Any] = [docs_tool()]
-        try:
-            from agents.graph_bridge_tool import as_langchain_tool as graph_tool
-            from agents.neo4j_client import is_enabled as neo4j_on
+                tools.append(docs_tool())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("docs_ask tool not added: %s", exc)
+        if self._graph_ready:
+            try:
+                from agents.graph_bridge_tool import as_langchain_tool as graph_tool
 
-            if neo4j_on():
                 tools.append(graph_tool())
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("graph_ask tool not added: %s", exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("graph_ask tool not added: %s", exc)
         return tools
 
     def _try_init_hermes_lite(self) -> bool:
@@ -309,10 +391,18 @@ class HermesHostService:
                 rag_rd = get_rag_agent().readiness()
             else:
                 rag_rd = {"ready": False, "error": "RAG_ENABLED=false"}
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             rag_rd = {"ready": False, "error": str(exc)}
+        if not rag_rd.get("ready") and self._rag_error:
+            rag_rd.setdefault("error", self._rag_error)
+        tools = self._host_tool_names()
+        # One working backend is enough to serve; degraded is still ready.
+        serving = self._ready and bool(tools)
         return {
-            "ready": self._ready and bool(rag_rd.get("ready")),
+            "ready": serving,
+            "degraded": serving and len(tools) < 2,
             "backend": self._backend,
             "host": "QXAudit",
             "agent": "QXAudit",
@@ -325,9 +415,40 @@ class HermesHostService:
             "helpers": {"rag": rag_rd, "graph": self._graph_readiness()},
             "rag_agent": rag_rd,
             "error": self._last_error,
-            "tools": ["docs_ask", "graph_ask"],
+            "tools": tools,
+            "unavailable": {
+                **({"docs_ask": self._rag_error} if not self._rag_ready else {}),
+                **({"graph_ask": self._graph_error} if not self._graph_ready else {}),
+            },
             "toolsets": self._enabled_toolsets(),
         }
+
+    def _degraded_note(self) -> str:
+        """Tell the model which tool is missing, so it stops promising it."""
+        missing: list[str] = []
+        if not self._rag_ready:
+            missing.append(
+                "`docs_ask` (hujjat matni) hozir MAVJUD EMAS — uni chaqirma. "
+                "Grafdagi ma'lumot bilan javob ber va hujjatning to'liq matni "
+                "vaqtincha mavjud emasligini foydalanuvchiga ayt."
+            )
+        if not self._graph_ready:
+            missing.append(
+                "`graph_ask` (bilim grafi) hozir MAVJUD EMAS — uni chaqirma. "
+                "Hujjat matni bilan javob ber va aniq raqam/formulani grafdan "
+                "tasdiqlab bo'lmasligini foydalanuvchiga ayt."
+            )
+        if not missing:
+            return ""
+        return "\n\n## DEGRADATSIYA (hozirgi holat)\n- " + "\n- ".join(missing) + "\n"
+
+    def _host_tool_names(self) -> list[str]:
+        names: list[str] = []
+        if self._rag_ready:
+            names.append("docs_ask")
+        if self._graph_ready:
+            names.append("graph_ask")
+        return names
 
     def _graph_readiness(self) -> dict[str, Any]:
         try:
@@ -365,6 +486,9 @@ class HermesHostService:
 
             if not self._ready:
                 self.initialize()
+            else:
+                # A backend that was down may be back — re-attach its tool.
+                self._maybe_recover()
             if not self._ready:
                 return {
                     "success": False,
@@ -400,6 +524,8 @@ class HermesHostService:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("self_improve augment skipped: %s", exc)
+
+            system_prompt = (system_prompt or "") + self._degraded_note()
 
             if self._backend == "hermes":
                 result = self._chat_hermes(message, sid, system_prompt=system_prompt)
@@ -526,7 +652,7 @@ class HermesHostService:
             "error": None,
             "session_id": sid,
             "backend": "hermes",
-            "agents_used": ["QXAudit", "docs_ask|graph_ask"],
+            "agents_used": ["QXAudit"] + self._host_tool_names(),
             "mode": "qxaudit_tool_host",
         }
 
@@ -607,7 +733,7 @@ class HermesHostService:
             "session_id": sid,
             "backend": "hermes_lite",
             "tool_call_count": tool_hits,
-            "agents_used": ["QXAudit"] + (tools_seen or ["docs_ask|graph_ask"]),
+            "agents_used": ["QXAudit"] + (tools_seen or self._host_tool_names()),
             "mode": "qxaudit_tool_hybrid",
         }
 
