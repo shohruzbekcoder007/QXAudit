@@ -497,6 +497,18 @@ class HermesHostService:
                     "session_id": session_id,
                 }
 
+            # Open WebUI housekeeping prompts (title / tags / follow-up
+            # suggestions) must never reach the tool agent: they waste a
+            # full-model call and push real turns out of the bounded session
+            # memory. Answer them with one cheap call, write nothing.
+            try:
+                from agents.self_improve import is_client_task_prompt
+
+                if is_client_task_prompt(message):
+                    return self._chat_meta_task(message, session_id)
+            except ImportError:
+                pass
+
             if not self._ready:
                 self.initialize()
             else:
@@ -609,6 +621,81 @@ class HermesHostService:
                 logger.info(
                     "host.seed_session sid=%s turns=%d", session_id, len(hist)
                 )
+
+    def _chat_meta_task(
+        self,
+        message: str,
+        session_id: str | None,
+    ) -> dict[str, Any]:
+        """
+        Answer a client housekeeping prompt (title / tags / follow-up
+        suggestions) with one cheap LLM call: no tools, no session memory,
+        no self-improve. Such prompts carry their own <chat_history> inline,
+        so nothing is lost by keeping them out of the host session.
+        """
+        sid = (session_id or "").strip() or str(uuid.uuid4())
+        logger.info(
+            "host.chat meta-task short-circuit sid=%s len=%d preview=%r",
+            sid,
+            len(message),
+            message[:60],
+        )
+        system = (
+            "You are a lightweight assistant for UI housekeeping tasks "
+            "(chat title, tags, follow-up suggestion generation). Follow the "
+            "task's requested output format exactly. No commentary."
+        )
+        task_model = _env("HERMES_TASK_MODEL") or "gpt-4.1-mini"
+        last_error: str | None = None
+        for model in dict.fromkeys([task_model, self.model_name]):
+            try:
+                from langchain_core.messages import HumanMessage, SystemMessage
+                from langchain_openai import ChatOpenAI
+
+                kwargs: dict[str, Any] = {
+                    "model": model,
+                    "api_key": self.api_key,
+                    "temperature": 0,
+                }
+                if self.base_url:
+                    kwargs["base_url"] = self.base_url
+                llm = ChatOpenAI(**kwargs)
+                resp = llm.invoke(
+                    [SystemMessage(content=system), HumanMessage(content=message)]
+                )
+                content = getattr(resp, "content", None)
+                if isinstance(content, list):
+                    text = " ".join(
+                        b.get("text", str(b)) if isinstance(b, dict) else str(b)
+                        for b in content
+                    )
+                else:
+                    text = str(content or "")
+                if not text.strip():
+                    last_error = f"empty response from {model}"
+                    continue
+                return {
+                    "success": True,
+                    "response": text,
+                    "error": None,
+                    "session_id": sid,
+                    "backend": "task_llm",
+                    "model": model,
+                    "tool_call_count": 0,
+                    "agents_used": ["QXAudit.task"],
+                    "mode": "meta_task",
+                }
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                logger.warning("meta task model %s failed: %s", model, exc)
+        return {
+            "success": False,
+            "response": None,
+            "error": f"meta task failed: {last_error}",
+            "error_code": "meta_task_error",
+            "session_id": sid,
+            "mode": "meta_task",
+        }
 
     def _chat_hermes(
         self,

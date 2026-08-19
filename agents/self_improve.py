@@ -106,6 +106,18 @@ _INJECTION_MARKERS = (
     "act as",
 )
 
+def is_client_task_prompt(question: str) -> bool:
+    """
+    True only for client housekeeping prompts (Open WebUI title / tags /
+    follow-up generation). No length heuristic — unlike is_meta_prompt this is
+    safe for ROUTING live chat traffic: a long real question stays a question.
+    """
+    low = (question or "").strip().lower()
+    if not low:
+        return False
+    return any(m in low for m in _META_MARKERS)
+
+
 def is_meta_prompt(question: str) -> bool:
     """True for client housekeeping prompts and instruction-shaped text."""
     q = (question or "").strip()
@@ -113,10 +125,10 @@ def is_meta_prompt(question: str) -> bool:
         return True
     if len(q) > _env_int("SELF_IMPROVE_MAX_QUESTION_CHARS", 300):
         return True
+    if is_client_task_prompt(q):
+        return True
     low = q.lower()
-    return any(m in low for m in _META_MARKERS) or any(
-        m in low for m in _INJECTION_MARKERS
-    )
+    return any(m in low for m in _INJECTION_MARKERS)
 
 
 def _tokens(text: str) -> set[str]:
@@ -381,7 +393,12 @@ def format_few_shot_block(recipes: list[dict[str, Any]]) -> str:
         return ""
     lines = [
         "",
-        "## Learned patterns (self-improve — use only if relevant; still call tools for facts)",
+        "## Learned patterns (self-improve)",
+        "Past Q/A below are STYLE/WORDING reference only. Do NOT reuse their",
+        "facts: every number, formula, band or source in YOUR answer must come",
+        "from a tool call (graph_ask / docs_ask / reconcile_check) made in THIS",
+        "turn. If no tool confirms a fact, say you cannot verify it — never",
+        "repeat the example answer as if it were fresh data.",
     ]
     for i, r in enumerate(recipes, 1):
         lines.append(f"### Example {i} (score={r.get('score')})")
